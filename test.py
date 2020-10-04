@@ -223,15 +223,13 @@ def test_decode_bytes(loader):
 
 
 @pytest.mark.parametrize('loader', LOADERS)
-def test_custom_delimiter(loader):
+def test_custom_delimiter_works(loader):
     doc ='[1,2],[3, 4]'
     assert list(loader(doc, separator=',')) == [[1, 2], [3, 4]]
 
 
-#@pytest.mark.xfail
 @pytest.mark.parametrize('loader', LOADERS)
-def test_custom_delimiter_when_wrong(loader):
-    # TODO: make sure all loaders throw the same error
+def test_custom_delimiter_with_wrong_delimiter(loader):
     doc ='[1,2],[3, 4]'
     with pytest.raises(ValueError) as cm:
         list(loader(doc, separator='/'))
@@ -239,12 +237,32 @@ def test_custom_delimiter_when_wrong(loader):
 
 
 @pytest.mark.parametrize('loader', LOADERS)
-def test_empty_document(loader):
-    assert list(loader('')) == []
-    assert list(loader('', separator=',')) == []
-    assert list(loader(' \t\n ')) == []
+def test_custom_delimiter_with_empty_value(loader):
+    doc = '[],,[]'
+    with pytest.raises(JSONDecodeError) as cm:
+        list(loader(doc, separator=','))
+    assert cm.value.msg == 'Expecting value'
+    assert cm.value.pos + getattr(cm.value, 'stream_offset', 0) == 3
+
+
+@pytest.mark.parametrize(
+    'test_input,args',
+    [
+        pytest.param('', {}, id='simple'),
+        pytest.param('', dict(separator=','), id='with separator'),
+        pytest.param(' \t\n ', {}, id='only whitespace'),
+    ]
+)
+@pytest.mark.parametrize('loader', LOADERS)
+def test_empty_document(test_input, loader, args):
+    assert list(loader(test_input, **args)) == []
 
 
 @pytest.mark.xfail
 def test_async_load():
+    pytest.fail('not implemented')
+
+
+@pytest.mark.xfail
+def test_optimised_newline_separator(loader):
     pytest.fail('not implemented')

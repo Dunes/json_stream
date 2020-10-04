@@ -65,10 +65,13 @@ def load(
     cls, kw = _parse_kw(
         cls, object_hook, parse_float, parse_int, parse_constant, object_pairs_hook, kw
     )
+    next_pos, pos = get_first_pos_and_next_pos_func(separator)
+        
     return iter(DecodeStream(
         fp,
         cls(**kw),
-        get_next_position_func(separator),
+        next_pos,
+        pos,
         kw.get('parse_int'),
         kw.get('parse_float'),
         bufsize,
@@ -113,7 +116,8 @@ def loads(
     cls, kw = _parse_kw(
         cls, object_hook, parse_float, parse_int, parse_constant, object_pairs_hook, kw
     )
-    return decode_stacked(s, get_next_position_func(separator), pos, cls(**kw))
+    next_pos, pos = get_first_pos_and_next_pos_func(separator)
+    return decode_stacked(s, cls(**kw), next_pos, pos)
 
 
 def _parse_kw(
@@ -134,19 +138,16 @@ def _parse_kw(
     return cls, kw
 
 
-def get_next_position_func(separator):
+def get_first_pos_and_next_pos_func(separator):
     if separator is None:
-        return next_position_by_non_whitespace
+        return next_position_by_non_whitespace, None
     else:
-        return partial(next_position_by_separator, separator)
+        return partial(next_position_by_separator, separator), 0
 
 
 def next_position_by_separator(separator, document, pos):
     if document.startswith(separator, pos):
         return pos + len(separator)
-    elif document and pos == 0:
-        # required by DecodeStream so that stream doesn't have to start with a delimiter
-        return 0
     elif pos == len(document):
         return None
     else:
@@ -158,17 +159,26 @@ def next_position_by_non_whitespace(document, pos):
     return match and match.start()
 
 
-def decode_stacked(document, next_pos, pos, decoder):
-    while True:
-        pos = next_pos(document, pos)
+def decode_stacked(document, decoder, next_pos, pos=None):
+    if not document:
+        return
+    if pos is None:
+        # if pos is None, then we don't actually know where the first
+        # object starts, so scan for it
+        pos = next_pos(document, 0)
         if pos is None:
             return
+    while True:
         try:
             obj, pos = decoder.raw_decode(document, pos)
         except JSONDecodeError as ex:
             # do something sensible if there's some error
             raise
         yield obj
+        
+        pos = next_pos(document, pos)
+        if pos is None:
+            return
 
 
 class DecodeStream:
@@ -177,6 +187,7 @@ class DecodeStream:
         stream,
         decoder,
         next_pos,
+        pos,
         parse_int,
         parse_float,
         bufsize=1048576, # 1MB
@@ -185,10 +196,10 @@ class DecodeStream:
     ):
         self.stream = stream
         self.decoder = decoder
-        self.next_pos = next_pos
+        self.next_pos_helper = next_pos
         self.bufsize = bufsize
         self.max_bufsize = max_bufsize
-        self.pos = 0
+        self.pos = pos
         self.partial_doc = ''
         self.stream_offset = stream_offset
         self._iter = None
@@ -207,16 +218,16 @@ class DecodeStream:
         return self._iter
 
     def _decode_stream_generator(self):
-        while True:
-            # find start of next object
-            new_pos = self.next_pos(self.partial_doc, self.pos)
-            if new_pos is None:
-                if self._try_read(''):
-                    continue
+        if self.pos is None:
+            # check to see where the first object might start
+            self.pos = 0
+            if not self.next_pos():
                 return
-            self.pos = new_pos
-            del new_pos
-
+        elif not self._try_read(self.partial_doc):
+            # otherwise check there is actually some data in the document
+            return
+            
+        while True:
             try:
                 obj, new_pos = self.decoder.raw_decode(self.partial_doc, self.pos)
             except JSONDecodeError as ex:
@@ -245,6 +256,27 @@ class DecodeStream:
             self.pos = new_pos
             del new_pos
             yield obj
+
+            # find start of next object
+            if not self.next_pos():
+                return
+
+    def next_pos(self):
+        """Read enough data from the stream until:
+
+        * the start of the next object is found (return true)
+        * the delimiter check fails (raise an error)
+        * the stream is empty (return false)
+        """
+        while True:
+            new_pos = self.next_pos_helper(self.partial_doc, self.pos)
+            if new_pos is None:
+                if self._try_read(''):
+                    continue
+                return False
+            else:
+                self.pos = new_pos
+                return True
 
     def _try_read(self, remaining_buffer):
         """
